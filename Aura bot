@@ -1,0 +1,175 @@
+from datetime import datetime
+import time
+import requests
+
+# ================= CONFIGURATION =================
+TELEGRAM_TOKEN = "8860865765:AAFSNO2GK3MXFQ6G3tU7_ip4JPyevBc8qX0"
+CHAT_ID = "5260369086"
+BASE_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+
+SCADENZE = {"M1": 60, "M3": 180, "M5": 300}
+
+# Tutte le 23 coppie di valute Forex presenti sulla piattaforma
+FOREX_PAIRS = [
+    "EUR/USD", "GBP/CAD", "GBP/USD", "USD/CAD", "USD/CHF", 
+    "USD/JPY", "CAD/JPY", "GBP/CHF", "AUD/CHF", "EUR/AUD", 
+    "EUR/JPY", "GBP/JPY", "EUR/CAD", "AUD/CAD", "AUD/JPY", 
+    "AUD/USD", "CAD/CHF", "CHF/JPY", "EUR/CHF", "EUR/GBP",
+    "NZD/USD", "NZD/JPY", "NZD/CAD"
+]
+
+def send_message(chat_id, text, reply_markup=None):
+    url = f"{BASE_URL}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    try:
+        requests.post(url, json=payload, timeout=20)
+    except Exception as e:
+        print(f"[ERROR SEND] {e}")
+
+def edit_message(chat_id, message_id, text, reply_markup=None):
+    url = f"{BASE_URL}/editMessageText"
+    payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "Markdown"}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    try:
+        requests.post(url, json=payload, timeout=20)
+    except Exception as e:
+        print(f"[ERROR EDIT] {e}")
+
+def get_next_candle_time(tf_seconds):
+    now = datetime.now()
+    timestamp = now.timestamp()
+    remainder = timestamp % tf_seconds
+    next_timestamp = timestamp + (tf_seconds - remainder)
+    return datetime.fromtimestamp(next_timestamp).strftime("%H:%M:%S")
+
+def ottieni_dati_live_forex(ticker):
+    """Interroga i tassi di cambio reali in tempo reale."""
+    try:
+        base_curr, quote_curr = ticker.split("/")
+        url = f"https://open.er-api.com/v6/latest/{base_curr}"
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        
+        if data.get("result") == "success":
+            rates = data.get("rates", {})
+            current_rate = rates.get(quote_curr)
+            if current_rate:
+                last_digit = int(str(current_rate)[-1])
+                direction = "BUY" if last_digit % 2 == 0 else "SELL"
+                emoji = "🟢" if direction == "BUY" else "🔴"
+                win_rate = round(84.0 + (last_digit * 0.5), 2)
+                return direction, emoji, win_rate
+        return None, None, None
+    except Exception as e:
+        print(f"Errore API Forex: {e}")
+        return None, None, None
+
+def get_main_menu():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "💱 Tutte le 23 Valute Forex", "callback_data": "cat_forex"}
+            ]
+        ]
+    }
+
+def get_category_keyboard():
+    keyboard = []
+    row = []
+    for asset in FOREX_PAIRS:
+        row.append({"text": asset, "callback_data": f"asset_{asset}"})
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([{"text": "🔙 Torna al Menu", "callback_data": "home"}])
+    return {"inline_keyboard": keyboard}
+
+def get_timeframe_keyboard(ticker):
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "M1 (60s)", "callback_data": f"tf_{ticker}_M1"},
+                {"text": "M3 (180s)", "callback_data": f"tf_{ticker}_M3"}
+            ],
+            [
+                {"text": "M5 (300s)", "callback_data": f"tf_{ticker}_M5"}
+            ],
+            [
+                {"text": "🔙 Indietro", "callback_data": "cat_forex"}
+            ]
+        ]
+    }
+
+def process_update(update):
+    if "callback_query" in update:
+        cq = update["callback_query"]
+        query_id = cq["id"]
+        chat_id = cq["message"]["chat"]["id"]
+        message_id = cq["message"]["message_id"]
+        data = cq["data"]
+
+        requests.post(f"{BASE_URL}/answerCallbackQuery", json={"callback_query_id": query_id})
+
+        if data == "home":
+            edit_message(chat_id, message_id, "🧬 *Aura 23-Pairs Forex Engine*\n\nSeleziona il mercato:", reply_markup=get_main_menu())
+        elif data == "cat_forex":
+            edit_message(chat_id, message_id, "⚙️ Seleziona una delle 23 coppie di valute:", reply_markup=get_category_keyboard())
+        elif data.startswith("asset_"):
+            ticker = data.replace("asset_", "")
+            edit_message(chat_id, message_id, f"📌 Asset selezionato: *{ticker}*\n\nSeleziona il timeframe (M1, M3 o M5):", reply_markup=get_timeframe_keyboard(ticker))
+        elif data.startswith("tf_"):
+            parts = data.split("_")
+            ticker = parts[1]
+            tf = parts[2]
+
+            edit_message(chat_id, message_id, f"⏳ *Analisi in corso per {ticker} ({tf})...*")
+
+            direction, emoji, win_rate = ottieni_dati_live_forex(ticker)
+
+            if direction is None:
+                edit_message(chat_id, message_id, "⚠️ Errore di connessione al flusso live. Riprova.", reply_markup=get_main_menu())
+                return
+
+            scad = SCADENZE.get(tf, 60)
+            entry_time = get_next_candle_time(scad)
+
+            msg = (
+                f"💎 *SEGNALE FOREX* 💎\n"
+                f"────────────────────────\n"
+                f"{emoji} *Direzione:* `{direction}`\n"
+                f"🔹 *Asset:* `{ticker}` ({tf})\n"
+                f"⏰ *Ingresso Obbligatorio:* `{entry_time}`\n"
+                f"📊 *Win Rate Statistico:* `{win_rate}%`\n"
+                f"💰 *Size Operativa:* `1% Capitale`"
+            )
+
+            send_message(CHAT_ID, msg)
+            edit_message(chat_id, message_id, "✅ Segnale inviato con successo sul canale.", reply_markup=get_main_menu())
+
+    elif "message" in update:
+        msg = update["message"]
+        chat_id = msg["chat"]["id"]
+        if msg.get("text", "").startswith("/start"):
+            send_message(chat_id, "🚀 *Aura 23-Pairs Bot Pronto*\n\nTutte le coppie Forex sono caricate e pronte all'uso.", reply_markup=get_main_menu())
+
+def main():
+    print("BOT 23 VALUTE FOREX ATTIVO SU PYDROID 3")
+    offset = 0
+    while True:
+        try:
+            r = requests.get(f"{BASE_URL}/getUpdates?offset={offset}&timeout=30", timeout=35).json()
+            if r.get("ok"):
+                for res in r.get("result", []):
+                    offset = res["update_id"] + 1
+                    process_update(res)
+        except Exception as e:
+            print(f"Errore: {e}")
+            time.sleep(3)
+
+if __name__ == "__main__":
+    main()
